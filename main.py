@@ -22,7 +22,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # В КОНЦЕ РАЗДЕЛА КОНФИГ (после bot = Bot(...))
 user_video_messages = {}
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMINS = [7727853285, 7931357584, 8799366869]
+ADMINS = [7727853285, 7931357584]
 MANAGER_USERNAME = "DiamondManager"
 COMMISSION_PERCENT = 2
 REFERRAL_PERCENT = 50
