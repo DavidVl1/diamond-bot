@@ -22,7 +22,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # В КОНЦЕ РАЗДЕЛА КОНФИГ (после bot = Bot(...))
 user_video_messages = {}
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMINS = [7727853285, 7931357584, 7855710591, 6652109627]
+SUPER_ADMINS = [7727853285]   # только твой ID
+# Для обратной совместимости (если где-то используется ADMINS)
+ADMINS = SUPER_ADMINS
 MANAGER_USERNAME = "DiamondManager"
 COMMISSION_PERCENT = 2
 REFERRAL_PERCENT = 50
@@ -116,6 +118,7 @@ TEXTS = {
         'stars': "⭐ STARS",
         'rub': "🇷🇺 RUB",
         'uah': "🇺🇦 UAH",
+        'usdt': "🇺🇸 USDT",
         'completed_deals': "✅ Завершённых сделок",
         'withdraw_label': "📤 *Вывод средств* — создайте заявку",
         'transactions_label': "📜 *Транзакции* — история операций",
@@ -224,6 +227,7 @@ TEXTS = {
         'stars': "⭐ STARS",
         'rub': "🇷🇺 RUB",
         'uah': "🇺🇦 UAH",
+        'usdt': "🇺🇸 USDT",
         'completed_deals': "✅ Completed deals",
         'withdraw_label': "📤 *Withdraw* — create a request",
         'transactions_label': "📜 *Transactions* — history",
@@ -327,6 +331,10 @@ class AdminGiveState(StatesGroup):
     wait_currency = State()
     wait_amount = State()
 
+class AdminManageState(StatesGroup):
+    wait_add_admin_id = State()
+    wait_remove_admin_id = State()
+
 class ReviewState(StatesGroup):
     wait_rating = State()
     wait_text = State()
@@ -341,58 +349,27 @@ async def init_db():
         await db.execute("""
                          CREATE TABLE IF NOT EXISTS users
                          (
-                             user_id
-                             INTEGER
-                             PRIMARY
-                             KEY,
-                             username
-                             TEXT,
-                             stars
-                             REAL
-                             DEFAULT
-                             0,
-                             rub
-                             REAL
-                             DEFAULT
-                             0,
-                             uah
-                             REAL
-                             DEFAULT
-                             0,
-                             completed_deals
-                             INTEGER
-                             DEFAULT
-                             0,
-                             cancelled_deals
-                             INTEGER
-                             DEFAULT
-                             0,
-                             rating
-                             REAL
-                             DEFAULT
-                             5,
-                             reviews_count
-                             INTEGER
-                             DEFAULT
-                             0,
-                             referrer_id
-                             INTEGER
-                             DEFAULT
-                             NULL,
-                             total_earned
-                             REAL
-                             DEFAULT
-                             0,
-                             lang
-                             TEXT
-                             DEFAULT
-                             'ru',
-                             created_at
-                             TIMESTAMP
-                             DEFAULT
-                             CURRENT_TIMESTAMP
+                             user_id INTEGER PRIMARY KEY,
+                             username TEXT,
+                             stars REAL DEFAULT 0,
+                             rub REAL DEFAULT 0,
+                             uah REAL DEFAULT 0,
+                             usdt REAL DEFAULT 0,
+                             completed_deals INTEGER DEFAULT 0,
+                             cancelled_deals INTEGER DEFAULT 0,
+                             rating REAL DEFAULT 5,
+                             reviews_count INTEGER DEFAULT 0,
+                             referrer_id INTEGER DEFAULT NULL,
+                             total_earned REAL DEFAULT 0,
+                             lang TEXT DEFAULT 'ru',
+                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                          )
                          """)
+        # Миграция для существующих баз
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN usdt REAL DEFAULT 0")
+        except:
+            pass
 
         await db.execute("""
                          CREATE TABLE IF NOT EXISTS deals
@@ -530,6 +507,14 @@ async def init_db():
                          )
                          """)
 
+        # ========== ТАБЛИЦА ДЛЯ ДИНАМИЧЕСКИХ АДМИНОВ ==========
+        await db.execute("""
+                         CREATE TABLE IF NOT EXISTS admins
+                         (
+                             user_id INTEGER PRIMARY KEY
+                         )
+                         """)
+
         await db.commit()
         print("✅ База данных инициализирована")
 
@@ -579,13 +564,13 @@ async def add_user(user_id, username, referrer_id=None):
 async def get_profile(user_id):
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute(
-                "SELECT stars, rub, uah, completed_deals, cancelled_deals, rating, reviews_count, total_earned FROM users WHERE user_id=?",
+                "SELECT stars, rub, uah, usdt, completed_deals, cancelled_deals, rating, reviews_count, total_earned FROM users WHERE user_id=?",
                 (user_id,)
         ) as cursor:
             row = await cursor.fetchone()
             if row:
                 return row
-            return (0, 0, 0, 0, 0, 5, 0, 0)
+            return (0, 0, 0, 0, 0, 0, 5, 0, 0)
 
 
 async def get_user_id(username):
@@ -649,9 +634,15 @@ async def save_review(deal_id: str, from_user_id: int, to_user_id: int, rating: 
             await db.commit()
 
 
-def is_admin(user_id):
-    return user_id in ADMINS
-
+async def is_admin(user_id):
+    # Суперадмины из кода
+    if user_id in SUPER_ADMINS:
+        return True
+    # Динамические админы из БД
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row is not None
 
 # ====================================================
 # ГЛАВНОЕ МЕНЮ (КНОПКИ С ПРЕМИУМ ЭМОДЗИ ЧЕРЕЗ icon_custom_emoji_id)
@@ -710,7 +701,7 @@ async def main_menu(user_id):
         )
     )
 
-    if is_admin(user_id):
+    if await is_admin(user_id):
         builder.row(
             InlineKeyboardButton(
                 text=texts['btn_admin'],
@@ -774,7 +765,7 @@ async def join_deal_handler(message: types.Message, deal_id: str):
 
     creator_id, creator_role, description, amount, currency, status = deal
 
-    if status != "AWAITING_PARTNER" and status != "WAITING_PARTNER":
+    if status not in ("AWAITING_PARTNER", "WAITING_PARTNER"):
         await message.answer(f"❌ Сделка уже {status}. Нельзя присоединиться.")
         return
 
@@ -790,79 +781,42 @@ async def join_deal_handler(message: types.Message, deal_id: str):
         buyer_id = creator_id
         seller_id = user_id
 
-    # Обновляем сделку
     async with aiosqlite.connect(DB_NAME) as db:
-        # Если создатель был покупателем - деньги уже заморожены, ставим PAID
-        if creator_role == "buyer":
-            await db.execute("UPDATE deals SET buyer_id=?, seller_id=?, status=? WHERE deal_id=?",
-                             (buyer_id, seller_id, "PAID", deal_id))
-        else:
-            await db.execute("UPDATE deals SET buyer_id=?, seller_id=?, status=? WHERE deal_id=?",
-                             (buyer_id, seller_id, "ACTIVE", deal_id))
+        await db.execute("UPDATE deals SET buyer_id=?, seller_id=?, status=? WHERE deal_id=?",
+                         (buyer_id, seller_id, "WAITING_PAYMENT", deal_id))
         await db.commit()
 
-    # Если создатель был покупателем - деньги уже заморожены
-    if creator_role == "buyer":
-        await message.answer(
-            f"✅ *Вы присоединились к сделке как ПРОДАВЕЦ!*\n\n"
-            f"📦 Товар: {description}\n"
-            f"💰 Сумма: {amount} {currency}\n\n"
-            f"📌 *Передайте товар менеджеру:* @{MANAGER_USERNAME}\n"
-            f"✅ После передачи нажмите кнопку ниже.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardBuilder().row(
-                InlineKeyboardButton(text="✅ Я передал товар", callback_data=f"gift_sent_{deal_id}")
-            ).as_markup()
-        )
+    # Уведомление покупателю с кнопкой оплаты
+    buyer_kb = InlineKeyboardBuilder()
+    buyer_kb.row(InlineKeyboardButton(text="💳 Оплатить", callback_data=f"pay_deal_{deal_id}"))
+    buyer_kb.row(InlineKeyboardButton(text=await get_text(buyer_id, 'back_to_menu'), callback_data="back_to_menu"))
 
-        # Уведомляем покупателя (создателя)
-        await bot.send_message(
-            creator_id,
-            f"🔔 *Продавец присоединился к сделке!*\n\n"
-            f"🆔 `{deal_id}`\n"
-            f"💰 Сумма: {amount} {currency}\n\n"
-            f"⏳ Ожидайте, пока продавец передаст товар менеджеру.",
-            parse_mode="Markdown"
-        )
+    await bot.send_message(
+        buyer_id,
+        f"✅ *Вы присоединились к сделке как ПОКУПАТЕЛЬ!*\n\n"
+        f"📦 Товар: {description}\n"
+        f"💰 Сумма: {amount} {currency}\n\n"
+        f"💳 *Для продолжения необходимо оплатить сделку.*\n"
+        f"Нажмите кнопку ниже, чтобы списать средства с вашего баланса.",
+        parse_mode="Markdown",
+        reply_markup=buyer_kb.as_markup()
+    )
 
-    else:  # creator_role == "buyer"
-        # Создатель - продавец, присоединяется покупатель
-        # Нужно заморозить деньги покупателя
-        stars, rub, uah, _, _, _, _, _ = await get_profile(user_id)
-        balances = {"STARS": stars, "RUB": rub, "UAH": uah}
+    # Уведомление продавцу
+    await bot.send_message(
+        seller_id,
+        f"✅ *Вы присоединились к сделке как ПРОДАВЕЦ!*\n\n"
+        f"📦 Товар: {description}\n"
+        f"💰 Сумма: {amount} {currency}\n\n"
+        f"⏳ *Ожидайте, пока покупатель оплатит сделку.*\n"
+        f"После оплаты вам нужно будет передать NFT подарок менеджеру, и подтвердить передачу.",
+        parse_mode="Markdown"
+    )
 
-        if balances[currency] < amount:
-            await message.answer(f"❌ Недостаточно средств. Доступно: {balances[currency]} {currency}")
-            # Откатываем сделку
-            async with aiosqlite.connect(DB_NAME) as db:
-                await db.execute("UPDATE deals SET status='CANCELLED' WHERE deal_id=?", (deal_id,))
-                await db.commit()
-            return
-
-        await remove_balance(user_id, currency, amount)
-        await add_transaction(user_id, "deal_freeze", currency, -amount, deal_id)
-
-        await message.answer(
-            f"✅ *Вы присоединились к сделке как ПОКУПАТЕЛЬ!*\n\n"
-            f"📦 Товар: {description}\n"
-            f"💰 Сумма: {amount} {currency} (заморожена)\n\n"
-            f"⏳ Ожидайте, пока продавец передаст товар менеджеру.",
-            parse_mode="Markdown"
-        )
-
-        # Уведомляем продавца (создателя)
-        await bot.send_message(
-            creator_id,
-            f"🔔 *Покупатель присоединился к сделке и заморозил {amount} {currency}!*\n\n"
-            f"🆔 `{deal_id}`\n"
-            f"📦 Товар: {description}\n\n"
-            f"📌 *Передайте товар менеджеру:* @{MANAGER_USERNAME}\n"
-            f"✅ После передачи нажмите кнопку ниже.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardBuilder().row(
-                InlineKeyboardButton(text="✅ Я передал товар", callback_data=f"gift_sent_{deal_id}")
-            ).as_markup()
-        )
+    try:
+        await message.delete()
+    except:
+        pass
 
 @router.message(Command("start"))
 async def start_handler(message: types.Message, state: FSMContext):
@@ -927,7 +881,6 @@ async def deal_role_selected(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(creator_role=role)
     await state.update_data(creator_id=user_id)
 
-    # Удаляем сообщение с выбором роли (чтобы не висело)
     try:
         await callback.message.delete()
     except:
@@ -939,23 +892,22 @@ async def deal_role_selected(callback: types.CallbackQuery, state: FSMContext):
                 rekv = await cursor.fetchone()
             if not rekv or not rekv[0]:
                 await edit_user_menu(user_id,
-                                     "⚠️ *Реквизиты не добавлены!*\n\nПожалуйста, добавьте реквизиты в разделе *Мои реквизиты* перед созданием сделки.",
+                                     "⚠️ *Реквизиты не добавлены!* ...",
                                      await back_button(user_id), parse_mode="Markdown")
                 await state.clear()
                 return
 
-    # Показываем выбор валюты (редактируем видео)
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="⭐ STARS", callback_data="deal_currency_STARS"),
         InlineKeyboardButton(text="🇷🇺 RUB", callback_data="deal_currency_RUB"),
-        InlineKeyboardButton(text="🇺🇦 UAH", callback_data="deal_currency_UAH")
+        InlineKeyboardButton(text="🇺🇦 UAH", callback_data="deal_currency_UAH"),
+        InlineKeyboardButton(text="🇺🇸 USDT", callback_data="deal_currency_USDT")
     )
     builder.row(InlineKeyboardButton(text=await get_text(user_id, 'back_to_menu'), callback_data="back_to_menu"))
 
     await edit_user_menu(user_id, "💳 *Способ оплаты:*\n\nКаким способом хотите оплатить сделку?", builder.as_markup(),
                          parse_mode="Markdown")
-
     await state.set_state(DealState.wait_currency)
     await callback.answer()
 
@@ -1025,20 +977,6 @@ async def deal_description_input(message: types.Message, state: FSMContext):
                                "AWAITING_PARTNER"))
         await db.commit()
 
-    # Замораживаем деньги если создатель - покупатель
-    if creator_role == "buyer":
-        stars, rub, uah, _, _, _, _, _ = await get_profile(user_id)
-        balances = {"STARS": stars, "RUB": rub, "UAH": uah}
-
-        if balances[currency] < amount:
-            await message.answer(f"❌ Недостаточно средств. Доступно: {balances[currency]} {currency}")
-            await state.clear()
-            return
-
-        await remove_balance(user_id, currency, amount)
-        await update_deal_status(deal_id, "WAITING_PARTNER")
-        await add_transaction(user_id, "deal_freeze", currency, -amount, deal_id)
-
     bot_username = (await bot.get_me()).username
     deal_link = f"https://t.me/{bot_username}?start=deal_{deal_id}"
 
@@ -1052,10 +990,10 @@ async def deal_description_input(message: types.Message, state: FSMContext):
         f"4. Описание: {description}\n\n"
         f"🔗 *Ссылка для {partner_role}:*\n"
         f"`{deal_link}`\n\n"
-        f"📤 Отправьте эту ссылку второй стороне для присоединения к сделке."
+        f"📤 Отправьте эту ссылку второй стороне для присоединения к сделке.\n\n"
+        f"⚠️ *Деньги будут списаны только после того, как вторая сторона присоединится и вы подтвердите оплату.*"
     )
 
-    # Отправляем результат как новое сообщение
     await message.answer(result_text, parse_mode="Markdown")
 
     # Возвращаем главное меню (редактируем видео)
@@ -1088,17 +1026,16 @@ async def deal_description_input(message: types.Message, state: FSMContext):
 
     await state.clear()
 
-
-
 @router.callback_query(F.data == "balance")
 async def balance_handler(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    stars, rub, uah, completed, _, _, _, _ = await get_profile(user_id)
+    stars, rub, uah, usdt, completed, _, _, _, _ = await get_profile(user_id)
 
     text = f"{await get_text(user_id, 'balance_title')}\n\n"
     text += f"{await get_text(user_id, 'stars')}: `{stars}`\n"
     text += f"{await get_text(user_id, 'rub')}: `{rub}`\n"
-    text += f"{await get_text(user_id, 'uah')}: `{uah}`\n\n"
+    text += f"{await get_text(user_id, 'uah')}: `{uah}`\n"
+    text += f"{await get_text(user_id, 'usdt')}: `{usdt}`\n\n"
     text += f"{await get_text(user_id, 'completed_deals')}: `{completed}`\n\n"
     text += "➖➖➖➖➖➖➖\n\n"
     text += f"{await get_text(user_id, 'withdraw_label')}\n"
@@ -1160,7 +1097,8 @@ async def withdraw_start(callback: types.CallbackQuery, state: FSMContext):
     builder.row(
         InlineKeyboardButton(text="⭐ STARS", callback_data="withdraw_STARS"),
         InlineKeyboardButton(text="🇷🇺 RUB", callback_data="withdraw_RUB"),
-        InlineKeyboardButton(text="🇺🇦 UAH", callback_data="withdraw_UAH")
+        InlineKeyboardButton(text="🇺🇦 UAH", callback_data="withdraw_UAH"),
+        InlineKeyboardButton(text="🇺🇸 USDT", callback_data="withdraw_USDT")
     )
     builder.row(InlineKeyboardButton(text=await get_text(user_id, 'back_to_menu'), callback_data="balance"))
 
@@ -1168,18 +1106,6 @@ async def withdraw_start(callback: types.CallbackQuery, state: FSMContext):
     await edit_user_menu(user_id, text, builder.as_markup(), parse_mode="Markdown")
     await state.set_state(WithdrawState.wait_currency)
     await callback.answer()
-
-@router.callback_query(WithdrawState.wait_currency, F.data.startswith("withdraw_"))
-async def withdraw_currency(callback: types.CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    currency = callback.data.replace("withdraw_", "")
-    await state.update_data(currency=currency)
-
-    text = await get_text(user_id, 'enter_amount', currency, currency)
-    await edit_user_menu(user_id, text, await back_button(user_id), parse_mode="Markdown")
-    await state.set_state(WithdrawState.wait_amount)
-    await callback.answer()
-
 
 @router.message(WithdrawState.wait_amount)
 async def withdraw_amount(message: types.Message, state: FSMContext):
@@ -1199,8 +1125,8 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
     data = await state.get_data()
     currency = data["currency"]
 
-    stars, rub, uah, _, _, _, _, _ = await get_profile(user_id)
-    balances = {"STARS": stars, "RUB": rub, "UAH": uah}
+    stars, rub, uah, usdt, _, _, _, _, _ = await get_profile(user_id)
+    balances = {"STARS": stars, "RUB": rub, "UAH": uah, "USDT": usdt}
 
     if balances[currency] < amount:
         text = await get_text(user_id, 'insufficient_funds', balances[currency], currency)
@@ -1211,7 +1137,6 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
     text = await get_text(user_id, 'enter_details')
     await message.answer(text, parse_mode="Markdown", reply_markup=await back_button(user_id))
     await state.set_state(WithdrawState.wait_details)
-
 
 @router.message(WithdrawState.wait_details)
 async def withdraw_details(message: types.Message, state: FSMContext):
@@ -1652,6 +1577,75 @@ async def dispute_deal(callback: types.CallbackQuery):
     )
 
 
+@router.callback_query(F.data.startswith("pay_deal_"))
+async def pay_deal(callback: types.CallbackQuery):
+    deal_id = callback.data.replace("pay_deal_", "")
+    user_id = callback.from_user.id
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            "SELECT buyer_id, seller_id, amount, currency, status, description FROM deals WHERE deal_id=?",
+            (deal_id,)
+        ) as cursor:
+            deal = await cursor.fetchone()
+
+    if not deal:
+        await callback.answer("❌ Сделка не найдена", show_alert=True)
+        return
+
+    buyer_id, seller_id, amount, currency, status, description = deal
+
+    if user_id != buyer_id:
+        await callback.answer("❌ Только покупатель может оплатить сделку", show_alert=True)
+        return
+
+    if status != "WAITING_PAYMENT":
+        await callback.answer(f"❌ Сделка уже в статусе {status}, оплата невозможна", show_alert=True)
+        return
+
+    # Проверка баланса
+    stars, rub, uah, usdt, _, _, _, _, _ = await get_profile(buyer_id)
+    balances = {"STARS": stars, "RUB": rub, "UAH": uah, "USDT": usdt}
+    if balances[currency] < amount:
+        await callback.answer(f"❌ Недостаточно средств. Доступно: {balances[currency]} {currency}", show_alert=True)
+        return
+
+    # Списание
+    await remove_balance(buyer_id, currency, amount)
+    await add_transaction(buyer_id, "deal_freeze", currency, -amount, deal_id)
+
+    # Изменение статуса
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE deals SET status=? WHERE deal_id=?", ("PAID", deal_id))
+        await db.commit()
+
+    # Уведомление покупателю
+    await callback.message.edit_text(
+        f"✅ *Оплата прошла успешно!*\n\n"
+        f"💰 Сумма {amount} {currency} заморожена.\n"
+        f"📦 Товар: {description}\n\n"
+        f"⏳ Теперь ожидайте, пока продавец передаст товар менеджеру.",
+        parse_mode="Markdown"
+    )
+
+    # Кнопка продавцу
+    seller_kb = InlineKeyboardBuilder()
+    seller_kb.row(InlineKeyboardButton(
+        text="✅ Я передал подарок менеджеру",
+        callback_data=f"gift_sent_{deal_id}"
+    ))
+    await bot.send_message(
+        seller_id,
+        f"🔔 *Покупатель оплатил сделку!*\n\n"
+        f"🆔 `{deal_id}`\n"
+        f"💰 Сумма: {amount} {currency}\n\n"
+        f"📌 *Передайте NFT подарок менеджеру:* @{MANAGER_USERNAME}\n"
+        f"✅ После передачи нажмите кнопку ниже.",
+        parse_mode="Markdown",
+        reply_markup=seller_kb.as_markup()
+    )
+    await callback.answer()
+
 # ====================================================
 # MY DEALS
 # ====================================================
@@ -1664,11 +1658,10 @@ async def my_deals(callback: types.CallbackQuery):
 
 
 async def show_deals_page(callback: types.CallbackQuery, user_id, page=1, search_query=None):
-    items_per_page = 4  # показывать по 4 сделки на странице
+    items_per_page = 4
 
     async with aiosqlite.connect(DB_NAME) as db:
         if search_query:
-            # Поиск по deal_id
             async with db.execute(
                     "SELECT deal_id, description, amount, currency, status FROM deals WHERE (buyer_id=? OR seller_id=?) AND deal_id LIKE ? ORDER BY created_at DESC",
                     (user_id, user_id, f"%{search_query}%")
@@ -1684,40 +1677,41 @@ async def show_deals_page(callback: types.CallbackQuery, user_id, page=1, search
     total_deals = len(deals)
     completed_count = sum(1 for d in deals if d[4] == "COMPLETED")
 
-    # Пагинация
     start = (page - 1) * items_per_page
     end = start + items_per_page
     page_deals = deals[start:end]
 
     total_pages = (total_deals + items_per_page - 1) // items_per_page if total_deals > 0 else 1
 
-    # Формируем текст
     text = f"📋 *Мои сделки*\n\n"
     text += f"📊 Всего: `{total_deals}` | ✅ Завершено: `{completed_count}`\n\n"
 
     if not page_deals:
         text += "❌ *У вас пока нет сделок.*\n"
     else:
-        # Показываем в две колонки (по желанию, можно просто в столбик)
+        status_emojis = {
+            "WAITING_PAYMENT": "💳",
+            "PAID": "✅",
+            "GIFT_SENT": "📦",
+            "COMPLETED": "🎉",
+            "DISPUTE": "⚠️",
+            "CANCELLED": "❌"
+        }
         for i in range(0, len(page_deals), 2):
             line = ""
             deal1 = page_deals[i]
-            status1 = "✅" if deal1[4] == "COMPLETED" else ("⏳" if deal1[4] == "PAID" else "📦")
-            line += f"`{deal1[0]}` {deal1[2]} {deal1[3]} {status1}"
+            emoji1 = status_emojis.get(deal1[4], "📌")
+            line += f"`{deal1[0]}` {deal1[2]} {deal1[3]} {emoji1}"
             if i + 1 < len(page_deals):
                 deal2 = page_deals[i + 1]
-                status2 = "✅" if deal2[4] == "COMPLETED" else ("⏳" if deal2[4] == "PAID" else "📦")
-                line += f"    `{deal2[0]}` {deal2[2]} {deal2[3]} {status2}"
+                emoji2 = status_emojis.get(deal2[4], "📌")
+                line += f"    `{deal2[0]}` {deal2[2]} {deal2[3]} {emoji2}"
             text += line + "\n"
 
-    # Пагинация
     if total_pages > 1:
         text += f"\n📄 *Страница {page} из {total_pages}*"
 
-    # Кнопки
     builder = InlineKeyboardBuilder()
-
-    # Навигация по страницам
     nav_buttons = []
     if page > 1:
         nav_buttons.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"deals_page_{page - 1}"))
@@ -1726,7 +1720,6 @@ async def show_deals_page(callback: types.CallbackQuery, user_id, page=1, search
     if nav_buttons:
         builder.row(*nav_buttons)
 
-    # Поиск
     builder.row(InlineKeyboardButton(text="🔍 Поиск по коду", callback_data="deals_search"))
     builder.row(InlineKeyboardButton(text=await get_text(user_id, 'back_to_menu'), callback_data="back_to_menu"))
 
@@ -1791,13 +1784,14 @@ async def get_deal_info(message: types.Message):
         return
 
     status_emoji = {
-        "WAITING_PAYMENT": "⏳",
+        "WAITING_PAYMENT": "💳",
         "PAID": "✅",
         "GIFT_SENT": "📦",
         "COMPLETED": "🎉",
         "DISPUTE": "⚠️",
         "CANCELLED": "❌"
     }
+    emoji = status_emoji.get(deal[6], "📌")
 
     text = f"📄 *Информация о сделке*\n\n"
     text += f"🆔 `{args[1]}`\n"
@@ -1806,10 +1800,9 @@ async def get_deal_info(message: types.Message):
     text += f"🎁 {deal[2]}\n"
     text += f"💰 {deal[3]} {deal[4]}\n"
     text += f"📊 Комиссия: {deal[5]} {deal[4]}\n"
-    text += f"📌 Статус: {status_emoji.get(deal[6], deal[6])}"
+    text += f"📌 Статус: {emoji} {deal[6]}"
 
     await message.answer(text, parse_mode="Markdown")
-
 
 # ====================================================
 # ADMIN PANEL
@@ -1833,13 +1826,19 @@ async def admin_panel_menu(user_id):
         InlineKeyboardButton(text="👑 Список админов", callback_data="admin_list"),
         InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")
     )
+    # ========== КНОПКИ ДЛЯ СУПЕРАДМИНА (твой ID) ==========
+    if user_id in SUPER_ADMINS:
+        builder.row(
+            InlineKeyboardButton(text="➕ Добавить админа", callback_data="admin_add_admin"),
+            InlineKeyboardButton(text="➖ Удалить админа", callback_data="admin_remove_admin")
+        )
     builder.row(InlineKeyboardButton(text="Назад в меню", callback_data="back_to_menu"))
     return builder.as_markup()
 
 @router.callback_query(F.data == "admin_panel")
 async def admin_panel(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    if not is_admin(user_id):
+    if not await is_admin(user_id):
         await callback.answer("⛔ Доступ запрещён")
         return
 
@@ -1853,32 +1852,13 @@ async def admin_panel(callback: types.CallbackQuery):
 
     text = f"⚙️ *Панель администратора*\n\n👥 Пользователей: {users}\n📦 Сделок: {deals}\n💸 Заявок на вывод: {pending_withdraws}"
 
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="📦 Активные сделки", callback_data="admin_active_deals"),
-        InlineKeyboardButton(text="💸 Заявки на вывод", callback_data="admin_withdraws")
-    )
-    builder.row(
-        InlineKeyboardButton(text="➕ Накрутить баланс", callback_data="admin_give"),
-        InlineKeyboardButton(text="✅ Завершить сделку", callback_data="admin_complete")
-    )
-    builder.row(
-        InlineKeyboardButton(text="💸 Возврат", callback_data="admin_refund"),
-        InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")
-    )
-    builder.row(
-        InlineKeyboardButton(text="👑 Список админов", callback_data="admin_list"),
-        InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")
-    )
-    builder.row(InlineKeyboardButton(text="Назад в меню", callback_data="back_to_menu"))
-
-    await edit_user_menu(user_id, text, builder.as_markup(), parse_mode="Markdown")
-
+    await edit_user_menu(user_id, text, await admin_panel_menu(user_id), parse_mode="Markdown")
 
 @router.callback_query(F.data == "admin_active_deals")
 async def admin_active_deals(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         return
+    # ... остальной код
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute(
                 "SELECT deal_id, description, amount, currency, status FROM deals WHERE status NOT IN ('COMPLETED', 'CANCELLED')") as cursor:
@@ -1888,14 +1868,26 @@ async def admin_active_deals(callback: types.CallbackQuery):
         return
     text = "📦 *Активные сделки*\n\n"
     for deal in deals:
-        text += f"🆔 `{deal[0]}` — {deal[1]} — {deal[2]} {deal[3]} — {deal[4]}\n"
+        status_text = deal[4]
+        if status_text == "WAITING_PAYMENT":
+            status_emoji = "💳"
+        elif status_text == "PAID":
+            status_emoji = "✅"
+        elif status_text == "GIFT_SENT":
+            status_emoji = "📦"
+        elif status_text == "DISPUTE":
+            status_emoji = "⚠️"
+        else:
+            status_emoji = "📌"
+        text += f"🆔 `{deal[0]}` — {deal[1]} — {deal[2]} {deal[3]} — {status_emoji} {status_text}\n"
     await callback.message.answer(text, parse_mode="Markdown")
 
 
 @router.callback_query(F.data == "admin_withdraws")
 async def admin_withdraws(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         return
+    # ...
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute(
                 "SELECT id, user_id, currency, amount, details FROM withdraws WHERE status='pending'") as cursor:
@@ -1915,8 +1907,9 @@ async def admin_withdraws(callback: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith("approve_withdraw_"))
 async def approve_withdraw(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         return
+    # ...
     withdraw_id = int(callback.data.replace("approve_withdraw_", ""))
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT user_id, currency, amount FROM withdraws WHERE id=?", (withdraw_id,)) as cursor:
@@ -1935,8 +1928,9 @@ async def approve_withdraw(callback: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith("decline_withdraw_"))
 async def decline_withdraw(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         return
+    # ...
     withdraw_id = int(callback.data.replace("decline_withdraw_", ""))
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT user_id, currency, amount FROM withdraws WHERE id=?", (withdraw_id,)) as cursor:
@@ -1950,9 +1944,10 @@ async def decline_withdraw(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "admin_give")
 async def admin_give_start(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
+    # ...
 
     await state.update_data(user_id=callback.from_user.id)
 
@@ -1960,7 +1955,8 @@ async def admin_give_start(callback: types.CallbackQuery, state: FSMContext):
     builder.row(
         InlineKeyboardButton(text="⭐ STARS", callback_data="give_currency_STARS"),
         InlineKeyboardButton(text="🇷🇺 RUB", callback_data="give_currency_RUB"),
-        InlineKeyboardButton(text="🇺🇦 UAH", callback_data="give_currency_UAH")
+        InlineKeyboardButton(text="🇺🇦 UAH", callback_data="give_currency_UAH"),
+        InlineKeyboardButton(text="🇺🇸 USDT", callback_data="give_currency_USDT")
     )
     builder.row(InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_give"))
 
@@ -1972,8 +1968,9 @@ async def admin_give_start(callback: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(AdminGiveState.wait_currency, F.data.startswith("give_currency_"))
 async def admin_give_currency(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         return
+    # ...
 
     currency = callback.data.replace("give_currency_", "")
     await state.update_data(currency=currency)
@@ -1986,8 +1983,9 @@ async def admin_give_currency(callback: types.CallbackQuery, state: FSMContext):
 
 @router.message(AdminGiveState.wait_amount)
 async def admin_give_amount(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         return
+    # ...
 
     try:
         amount = float(message.text.strip())
@@ -2089,8 +2087,9 @@ async def admin_give_user_id(message: types.Message, state: FSMContext):
 
 @router.callback_query(AdminGiveState.wait_currency, F.data.startswith("give_currency_"))
 async def admin_give_currency(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         return
+    # ...
 
     currency = callback.data.replace("give_currency_", "")
     await state.update_data(currency=currency)
@@ -2103,8 +2102,9 @@ async def admin_give_currency(callback: types.CallbackQuery, state: FSMContext):
 
 @router.message(AdminGiveState.wait_amount)
 async def admin_give_amount(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         return
+    # ...
 
     try:
         amount = float(message.text.strip())
@@ -2148,22 +2148,25 @@ async def cancel_give(callback: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "admin_complete")
 async def admin_complete(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         return
+    # ...
     await callback.message.answer("📝 *Отправьте команду:*\n`/complete DEAL_ID`", parse_mode="Markdown")
 
 
 @router.callback_query(F.data == "admin_refund")
 async def admin_refund(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         return
+    # ...
     await callback.message.answer("📝 *Отправьте команду:*\n`/refund DEAL_ID`", parse_mode="Markdown")
 
 
 @router.message(Command("complete"))
 async def complete_deal_admin(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         return
+    # ...
     args = message.text.split()
     if len(args) != 2:
         await message.answer("❌ Использование: `/complete DEAL_ID`", parse_mode="Markdown")
@@ -2174,8 +2177,9 @@ async def complete_deal_admin(message: types.Message):
 
 @router.message(Command("refund"))
 async def refund_deal_admin(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         return
+    # ...
     args = message.text.split()
     if len(args) != 2:
         await message.answer("❌ Использование: `/refund DEAL_ID`", parse_mode="Markdown")
@@ -2194,8 +2198,9 @@ async def refund_deal_admin(message: types.Message):
 
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         return
+    # ...
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT COUNT(*) FROM users") as cursor:
             users = (await cursor.fetchone())[0]
@@ -2210,8 +2215,9 @@ async def admin_stats(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "admin_list")
 async def admin_list(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         return
+    # ...
     text = "👑 *Список администраторов*\n\n"
     for admin in ADMINS:
         text += f"• `{admin}`\n"
@@ -2220,7 +2226,7 @@ async def admin_list(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "admin_users")
 async def admin_users_list(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         return
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT user_id, username FROM users LIMIT 50") as cursor:
@@ -2232,13 +2238,104 @@ async def admin_users_list(callback: types.CallbackQuery):
 
 
 # ====================================================
+# УПРАВЛЕНИЕ АДМИНАМИ (только для суперадмина)
+# ====================================================
+
+@router.callback_query(F.data == "admin_add_admin")
+async def admin_add_admin_button(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    if user_id not in SUPER_ADMINS:
+        await callback.answer("❌ Только суперадмин может добавлять админов", show_alert=True)
+        return
+
+    await state.set_state(AdminManageState.wait_add_admin_id)
+    await callback.message.answer("📝 *Введите Telegram ID пользователя, которого хотите сделать администратором:*\n\nПример: `123456789`", parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_remove_admin")
+async def admin_remove_admin_button(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    if user_id not in SUPER_ADMINS:
+        await callback.answer("❌ Только суперадмин может удалять админов", show_alert=True)
+        return
+
+    await state.set_state(AdminManageState.wait_remove_admin_id)
+    await callback.message.answer("📝 *Введите Telegram ID пользователя, которого хотите удалить из администраторов:*\n\nПример: `123456789`", parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.message(AdminManageState.wait_add_admin_id)
+async def process_add_admin(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    if user_id not in SUPER_ADMINS:
+        await message.answer("❌ Нет прав.")
+        await state.clear()
+        return
+
+    try:
+        new_admin_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ ID должен быть числом. Попробуйте снова.")
+        return
+
+    if new_admin_id == user_id:
+        await message.answer("❌ Вы и так суперадмин. Не нужно добавлять себя.")
+        await state.clear()
+        return
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("INSERT OR IGNORE INTO admins(user_id) VALUES(?)", (new_admin_id,))
+        await db.commit()
+
+    await message.answer(f"✅ Пользователь `{new_admin_id}` добавлен в администраторы.", parse_mode="Markdown")
+    await state.clear()
+
+    # Возвращаем в админ-панель
+    mock_callback = types.CallbackQuery(id="0", from_user=message.from_user, message=message, chat_instance="0", data="admin_panel")
+    await admin_panel(mock_callback)
+
+
+@router.message(AdminManageState.wait_remove_admin_id)
+async def process_remove_admin(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    if user_id not in SUPER_ADMINS:
+        await message.answer("❌ Нет прав.")
+        await state.clear()
+        return
+
+    try:
+        admin_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ ID должен быть числом. Попробуйте снова.")
+        return
+
+    if admin_id == user_id:
+        await message.answer("❌ Нельзя удалить самого себя (суперадмина).")
+        await state.clear()
+        return
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("DELETE FROM admins WHERE user_id=?", (admin_id,))
+        await db.commit()
+
+    await message.answer(f"✅ Пользователь `{admin_id}` удалён из администраторов.", parse_mode="Markdown")
+    await state.clear()
+
+    # Возвращаем в админ-панель
+    mock_callback = types.CallbackQuery(id="0", from_user=message.from_user, message=message, chat_instance="0", data="admin_panel")
+    await admin_panel(mock_callback)
+
+
+# ====================================================
 # ADDITIONAL COMMANDS
 # ====================================================
 
 @router.message(Command("stats"))
 async def stats_command(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         return
+    # ... остальной код stats_command
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT COUNT(*) FROM users") as cursor:
             users = (await cursor.fetchone())[0]
@@ -2271,6 +2368,53 @@ async def info(message: types.Message):
     text = await get_text(user_id, 'info_text', COMMISSION_PERCENT, REFERRAL_PERCENT, MANAGER_USERNAME)
     await message.answer(text, parse_mode="Markdown")
 
+    @router.message(Command("add_admin"))
+    async def add_admin(message: types.Message):
+        user_id = message.from_user.id
+        if user_id not in SUPER_ADMINS:
+            await message.answer("❌ У вас нет прав на эту команду.")
+            return
+
+        args = message.text.split()
+        if len(args) != 2:
+            await message.answer("❌ Использование: `/add_admin USER_ID`", parse_mode="Markdown")
+            return
+
+        try:
+            new_admin_id = int(args[1])
+        except ValueError:
+            await message.answer("❌ ID должен быть числом.")
+            return
+
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("INSERT OR IGNORE INTO admins(user_id) VALUES(?)", (new_admin_id,))
+            await db.commit()
+
+        await message.answer(f"✅ Пользователь `{new_admin_id}` добавлен в админы.", parse_mode="Markdown")
+
+    @router.message(Command("remove_admin"))
+    async def remove_admin(message: types.Message):
+        user_id = message.from_user.id
+        if user_id not in SUPER_ADMINS:
+            await message.answer("❌ У вас нет прав на эту команду.")
+            return
+
+        args = message.text.split()
+        if len(args) != 2:
+            await message.answer("❌ Использование: `/remove_admin USER_ID`", parse_mode="Markdown")
+            return
+
+        try:
+            admin_id = int(args[1])
+        except ValueError:
+            await message.answer("❌ ID должен быть числом.")
+            return
+
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("DELETE FROM admins WHERE user_id=?", (admin_id,))
+            await db.commit()
+
+        await message.answer(f"✅ Пользователь `{admin_id}` удалён из админов.", parse_mode="Markdown")
 
 # ====================================================
 # REVIEW SYSTEM
