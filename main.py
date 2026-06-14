@@ -786,6 +786,40 @@ async def join_deal_handler(message: types.Message, deal_id: str):
                          (buyer_id, seller_id, "WAITING_PAYMENT", deal_id))
         await db.commit()
 
+    # ========== УВЕДОМЛЕНИЕ СУПЕРАДМИНУ ==========
+    # Получаем username покупателя и продавца (если есть)
+    buyer_username = None
+    seller_username = None
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT username FROM users WHERE user_id=?", (buyer_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                buyer_username = row[0]
+        async with db.execute("SELECT username FROM users WHERE user_id=?", (seller_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                seller_username = row[0]
+
+    buyer_display = f"@{buyer_username}" if buyer_username else f"`{buyer_id}`"
+    seller_display = f"@{seller_username}" if seller_username else f"`{seller_id}`"
+
+    # Отправляем сообщение всем суперадминам
+    for admin_id in SUPER_ADMINS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"🔔 *НОВАЯ СДЕЛКА (обе стороны в сборе)*\n\n"
+                f"🆔 `{deal_id}`\n"
+                f"👤 Покупатель: {buyer_display}\n"
+                f"👤 Продавец: {seller_display}\n"
+                f"💰 Сумма: {amount} {currency}\n"
+                f"🎁 Описание: {description}\n\n"
+                f"⏳ Статус: ожидает оплаты от покупателя",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
+
     # Уведомление покупателю с кнопкой оплаты
     buyer_kb = InlineKeyboardBuilder()
     buyer_kb.row(InlineKeyboardButton(text="💳 Оплатить", callback_data=f"pay_deal_{deal_id}"))
